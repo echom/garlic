@@ -1,64 +1,71 @@
+var crypto = require("crypto");
+
 var protocol = {}
 
 protocol.port = 6481;
 protocol.rsaKeyLength = 2048 / 8;
+protocol.rsaPadding = 11;
 protocol.aesMethod = 'aes-256-cbc';
 protocol.aesKeyLength = 32;
 protocol.aesIVLength = 16;
 
 protocol.version = 1;
 
-protocol.sourceBlockLength = 256;
-protocol.commandBlockLength = 256;
-protocol.headerLength = protocol.sourceBlockLength + 8 * protocol.commandBlockLength;
+protocol.cbLength = 256;
+protocol.cbCount = 8;
+protocol.headerLength = protocol.cbCount * protocol.cbLength;
+protocol.urlMaxLength = protocol.cbLength - protocol.rsaPadding - protocol.cbTailStart - 1;
+protocol.userHashLength = 32;
+protocol.packageHashLength = 32;
 
-protocol.magic = [0xAA, 0xBB, 0xCC, 0xDD];
 protocol.commandPut = 1;
 protocol.commandRelay = 2;
 protocol.commandAck = 4;
 
-protocol.commandIndex = 4;
-protocol.commandSize = 1;
-protocol.commandDataOffset = protocol.commandIndex + protocol.commandSize;
+protocol.cbVersionStart = 0;
+protocol.cbVersionEnd = 1;
+protocol.cbCommandStart = protocol.cbVersionEnd;
+protocol.cbCommandEnd = protocol.cbCommandStart + 1;
+protocol.cbAesKeyStart = protocol.cbCommandEnd;
+protocol.cbAesKeyEnd = protocol.cbAesKeyStart + protocol.aesKeyLength;
+protocol.cbAesIvStart = protocol.cbAesKeyEnd;
+protocol.cbAesIvEnd = protocol.cbAesKeyEnd + protocol.aesIVLength;
+protocol.cbUserHashStart = protocol.cbAesIvEnd;
+protocol.cbUserHashEnd = protocol.cbAesIvEnd + protocol.userHashLength;
+protocol.cbTailStart = protocol.cbUserHashEnd;
 
-protocol.userSize = 32;
-protocol.addressSize = 18;
-protocol.packageSize = 32;
 
 protocol.getMessageSize = function(byteLength) {
 	var l = Math.log(byteLength) / Math.log(2);
 	return Math.pow(2, Math.ceil((l - 4) / 2) * 2 + 4);
 };
 
+protocol.hash = function(data) {
+    hash = crypto.createHash("sha256");
+    hash.update(data);
+	return hash.digest();
+}
+
 module.exports = protocol;
 
-
 //MESSAGE:
-// - begin source block (256 bytes -> RSA-2048)
-//     1 byte protocol version
-//     1 byte message type
-//    32 byte symmetric key for transport container
-//     4 byte symmetric iv for transport container
-// - end source block
-// - begin encrypted transport container
 //    - begin header: 8 x 256 bytes
-//      command block   (256 bytes -> RSA-2048)
-//        4 byte magic token (0xaabbccdd)
+//      command block   (256 bytes -> RSA-2048, contents: 245 bytes)
+//        1 byte protocol version
 //        1 byte command (put = 1, relay = 2, ack = 4)
-//        case put:       32 byte user hash, 16 byte IPv6 + 2 byte port number (ack)
-//        case relay:     16 byte IPv6 + 2 byte port number
-//        case ack:       32 byte user hash, 32 byte package hash
+//       32 byte symmetric key for transport container
+//        4 byte symmetric iv for transport container
+//       32 byte user hash (empty in case of relay)
+//        case put/relay:  1 byte URL-length, 172 byte URL (utf-8 encoded)
+//        case ack:       32 byte package hash
 //    - end header
 //    - payload (size: 2^(2n+4) bytes with 0 >= n <= 10)
-// - end encrypted transport container
 //
 // Node receives message
-// - decrypt source block
-// - check protocol version
-// - decrypt transport container
-// - decrypt next command block
-// IF COMMAND BLOCK IS VALID (compare 4-byte token)
-//    - handle command (relay-only nodes only process RELAY commands and drop everything else)
+// - decrypt first command block (node's private RSA key)
+//		- check protocol version
+//		- decrypt remaining command blocks and payload 1 by 1 with contained AES parameters
+//		- handle command (relay-only nodes only process RELAY commands and drop everything else)
 //      - PUT:
 //          - read user hash
 //          - generate package hash
@@ -68,9 +75,5 @@ module.exports = protocol;
 //      - RELAY:  read target address
 //      - ACK:    store ack message for client
 //
-//    - shift source blocks left and pad right with random bytes
-//    - encrypt transport container symmetrically
-//    - encrypt transport key asymmetrically with public key of target
-//    - join new source block and transport container
+//    - shift command blocks left and pad right with random bytes
 //    - send to target node
-// IF COMMAND BLOCK IS INVALID -> drop!

@@ -1,63 +1,58 @@
 var http = require('http');
 var fs = require('fs')
-var ursa = require('ursa');
+var NodeRSA = require('node-rsa');
 var crypto = require('crypto');
 var protocol = require('./protocol');
 
-var pubKeyCache = {
-	'0000:0000:0000:0000:0000:0000:0000:0001': ursa.createPublicKey(fs.readFileSync('./pub.pem'))
-};
+var pubKeyCache = {};
+pubKeyCache['http://localhost:' + protocol.port] = new NodeRSA(fs.readFileSync('pub.pem'));
+
 
 function test() {
-	var payload = new Buffer("hello world");
-	var nextTarget = new Buffer([
-		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-		(protocol.port >> 8) & 0xff,
-		protocol.port & 0xff
-	]);
-	var nextTargetAddress = '';
-	var nextTargetPort = nextTarget[16] * 256 + nextTarget[17];
-	for (i = 0; i < 8; i++) {
-		nextTargetAddress += nextTarget.toString('hex', 2 * i, 2 * (i + 1));
-		if (i < 7) nextTargetAddress += ':';
-	}
+	var message = "hello world";
+	var payload = new Buffer(message);
+	var payloadSize = Buffer.byteLength(message);
+	var messageSize = protocol.getMessageSize(payloadSize);
+	var remainderSize = messageSize - payloadSize;
 
-	var commandBlock = Buffer.concat([
-		new Buffer(protocol.magic),
-		new Buffer(protocol.commandPut),
-		crypto.randomBytes(protocol.userSize),
-		nextTarget
-	]);
+	var nextTargetAddress = 'http://localhost:' + protocol.port;
+	var nextTarget = new Buffer(nextTargetAddress, 'utf-8');
 
-	var transportContainer = Buffer.concat([
-		commandBlock,
-		crypto.randomBytes(7 * protocol.commandBlockLength),
-		payload
-	]);
 	var aesKey = crypto.randomBytes(protocol.aesKeyLength);
 	var aesIV = crypto.randomBytes(protocol.aesIVLength);
+	var rsaKey = pubKeyCache[nextTargetAddress];
 
-	var sourceBlock = Buffer.concat([
-		new Buffer([protocol.version, 0]),
-		aesKey,
-		aesIV
+	var commandBlock = Buffer.concat([
+		new Buffer([protocol.version, protocol.commandPut]),
+		aesKey = crypto.randomBytes(protocol.aesKeyLength),
+		aesIV = crypto.randomBytes(protocol.aesIVLength),
+		crypto.randomBytes(protocol.userHashLength),
+		new Buffer([Buffer.byteLength(nextTargetAddress, 'utf-8')]),
+		nextTarget
 	]);
-	var targetKey = pubKeyCache[nextTargetAddress];
+	commandBlock = rsaKey.encrypt(commandBlock);
+	console.log(commandBlock.length);
+	//TODO: encrypt hop command blocks with AES
+	var commandGarbage = crypto.randomBytes(7 * protocol.cbLength);
 
-	sourceBlock = targetKey.encrypt(sourceBlock);
-	console.log(nextTargetAddress, nextTargetPort);
 	var reqOut = http.request({
-		host: nextTargetAddress,
-		port: nextTargetPort,
-		method: 'PUT'
+		host: 'localhost',
+		port: protocol.port,
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/octet-stream' }
 	});
+	var fsOut = fs.createWriteStream("send.bin");
 
-	reqOut.write(sourceBlock);
+	reqOut.write(commandBlock);
+	reqOut.write(commandGarbage);
+	fsOut.write(commandBlock);
+	fsOut.write(commandGarbage);
+
 	aesStream = crypto.createCipheriv(protocol.aesMethod, aesKey, aesIV);
 	aesStream.pipe(reqOut);
-	aesStream.write(transportContainer);
+	aesStream.pipe(fsOut);
+	aesStream.write(payload);
 	aesStream.end();
-	reqOut.end();
 }
 
 test();

@@ -1,11 +1,29 @@
 var http = require('http');
 var fs = require('fs')
-var ursa = require('ursa');
+var NodeRSA = require('node-rsa');
 var crypto = require('crypto');
 var protocol = require('./protocol');
+var stream = require('stream');
+var MultiStream = require('multistream');
+var url = require("url");
 
-var key = ursa.createPrivateKey(fs.readFileSync('./key.pem'));
+var key;
 var port = protocol.port;
+
+(function setup() {
+	var nrsa,
+		privateKey,
+		publicKey;
+	if(!fs.existsSync('./key.pem')) {
+		nrsa = new NodeRSA();
+		nrsa.generateKeyPair();
+		privateKey = nrsa.exportKey('pkcs1-private');
+		publicKey = nrsa.exportKey('pkcs1-public');
+		fs.writeFileSync('./key.pem', privateKey);
+		fs.writeFileSync('./pub.pem', publicKey);
+	}
+	key = new NodeRSA(fs.readFileSync('key.pem'));
+})();
 
 var server = http.createServer(function(req, res) {
 	switch (req.method) {
@@ -19,7 +37,7 @@ var server = http.createServer(function(req, res) {
 });
 
 function isProtocolValid(version) {
-	return version == protocol.version;
+	return ;
 }
 
 function handleMessage(reqIn, resIn) {
@@ -37,123 +55,78 @@ function handleMessage(reqIn, resIn) {
 		userHash,
 		packageHash,
 		command;
+
 	reqIn.on('data', function(chunk) {
 		chunks.push(chunk);
 	});
 	reqIn.on('end', function() {
 		data = Buffer.concat(chunks);
-		sourceBlock = data.slice(0, protocol.sourceBlockLength);
-		sourceBlock = key.decrypt(sourceBlock);
+		commandBlock = data.slice(0, protocol.cbLength);
+		console.log(commandBlock.length);
+		try {
+			commandBlock = key.decrypt(commandBlock);
+		} catch(e) {
+			console.log("invalid message", e);
+			resIn.end();
+			return;
+		}
 
-		if (isValid = isProtocolValid(sourceBlock[0])) {
-			aesKey = sourceBlock.slice(2, 2 + protocol.aesKeyLength);
-			aesIV = sourceBlock.slice(2 + protocol.aesKeyLength, 2 + protocol.aesKeyLength + protocol.aesIVLength);
+		if (commandBlock[0] == protocol.version) {
+			command = commandBlock[1];
+			aesKey = commandBlock.slice(protocol.cbAesKeyStart, protocol.cbAesKeyEnd);
+			aesIV = commandBlock.slice(protocol.cbAesIvStart, protocol.cbAesIvEnd);
+			userHash = commandBlock.slice(protocol.cbUserHashStart, protocol.cbUserHashEnd);
+			payload = data.slice(protocol.headerLength);
 
-			chunks = [];
-			aesStream = crypto.createDecipheriv(protocol.aesMethod, aesKey, aesIV);
-			aesStream.on('data', function(chunk) {
-				console.log("chunk");
-				chunks.push(chunk);
-			});
-			aesStream.on('end', function() {
-				transportContainer = Buffer.concat(chunks);
-				commandBlock = transportContainer.slice(0, protocol.commandBlockLength);
-				commandBlock = key.decrypt(commandBlock);
-
-				for (i = 0; i < 4; i++) {
-					if (commandBlock[i] != protocol.magic[i]) {
-						isValid = false;
-						break;
-					}
-				}
-				if (isValid) {
-					switch (command = commandBlock[protocol.commandIndex]) {
-						case protocol.commandPut:
-							userHash = commandBlock.slice(
-								protocol.commandDataOffset,
-								protocol.commandDataOffset + protocol.userSize
-							);
-							nextTarget = commandBlock.slice(
-								protocol.commandDataOffset + protocol.userSize,
-								protocol.commandDataOffset + protocol.userSize + protocol.addressSize
-							);
-							break;
-						case protocol.commandRelay:
-							nextTarget = commandBlock.slice(
-								protocol.commandDataOffset,
-								protocol.commandDataOffset + protocol.addressSize
-							);
-							break;
-						case protocol.commandAck:
-							userHash = commandBlock.slice(
-								protocol.commandDataOffset,
-								protocol.commandDataOffset + protocol.userSize
-							);
-							packageHash = commandBlock.slice(
-								protocol.commandDataOffset + protocol.userSize,
-								protocol.commandDataOffset + protocol.userSize + protocol.packageSize
-							);
-							break;
-						default:
-							isValid = false;
-							break;
-					}
+			//RELAY
+			if(command != protocol.commandAck) {
+				var nextTargetLength = commandBlock[protocol.cbTailStart];
+				if(nextTargetLength > protocol.maxUrlLength) {
+					console.log("url too long, dropping");
+					return;
 				}
 
-				if (isValid) {
-					var remainder = data.slice(
-						protocol.sourceBlockLength + protocol.commandBlockLength,
-						protocol.headerLength
-					);
-					var payload = data.slice(protocol.headerLength);
+				nextTarget = commandBlock.slice(protocol.cbTailStart + 1, protocol.cbTailStart + nextTargetLength + 1).toString('utf-8');
+				nextTarget = url.parse(nextTarget);
 
-					if (command == protocol.commandPut) {
-						packageHash = hash(payload);
-						payload = putMessage(userHash, packageHash, payload);
-					} else if (command == protocol.commandAck)
-						ackMessage(userHash, packageHash, payload);
-				}
+				var reqOut = http.request({
+					host: nextTarget.host,
+					port: nextTarget.port,
+					method: 'PUT'
+				});
 
-				if (command == protocol.commandPut ||  command = protocol.commandRelay) {
-					var nextTargetAddress = '';
-					var nextTargetPort = nextTarget[16] * 256 + nextTarget[17];
-					for (i = 0; i < 8; i++) {
-						nextTargetAddress += nextTarget.toString('hex', 2 * i, 2 * (i + 1));
-						if (i < 7) nextTargetAddress += ':';
-					}
-					transportContainer = Buffer.concat([
-						remainder,
-						crypto.randomBytes(protocol.commandBlockLength),
-						payload
-					]);
-					aesKey = crypto.randomBytes(protocol.aesKeyLength);
-					aesIV = crypto.randomBytes(protocol.aesKeyLength);
-
-					sourceBlock = Buffer.concat([
-						new Buffer(protocol.version, 0),
-						aesKey,
-						aesIV
-					]);
-					var targetKey = pubKeyCache[nextTargetAddress];
-					sourceBlock = targetKey.encrypt(sourceBlock);
-
-					var reqOut = http.request({
-						host: nextTargetAddress,
-						port: nextTargetPort,
-						method: 'PUT'
+				var streams = [];
+				for(i = 1; i < protocol.cbCount; i++) {
+					streams.push(function() {
+						var aesStream = crypto.createDecipheriv(protocol.aesMethod, aesKey, aesIV);
+						aesStream.end(data.slice(i*protocol.cbLength, (i+1)*protocol.cbLength));
+						return aesStream;
 					});
-
-					reqOut.write(sourceBlock);
-					aesStream = crypto.createCipheriv(protocol.aesMethod, aesKey, aesIV);
-					aesStream.pipe(reqOut);
-					aesStream.write(transportContainer);
-					aesStream.end();
-					reqOut.end();
 				}
-			});
+				streams.push(function() {
+					var s = new stream.PassThrough();
+					s.end(crypto.randomBytes(protocol.cbLength));
+					return s;
+				});
 
-			aesStream.write(data.slice(protocol.sourceBlockLength));
-			aesStream.end();
+				streams.push(function() {
+					var aesStream = crypto.createDecipheriv(protocol.aesMethod, aesKey, aesIV);
+					aesStream.end(payload);
+					return aesStream;
+				});
+
+				MultiStream(streams).pipe(reqOut);
+			}
+
+			if (command == protocol.commandPut) {
+				packageHash = protocol.hash(payload);
+				payload = putMessage(userHash, packageHash, payload);
+			} else if (command == protocol.commandAck) {
+				packageHash = commandBlock.slice(protocol.cbTailStart, protocol.cbTailStart + protocol.userHashLength);
+				ackMessage(userHash, packageHash, payload);
+			}
+		} else {
+			console.log("unsupported protocol version");
 		}
 		resIn.end();
 	});
@@ -161,12 +134,14 @@ function handleMessage(reqIn, resIn) {
 
 function putMessage(userHash, packageHash, payload) {
 	console.log("putting message for " + userHash.toString());
+	console.log("message: " + payload.toString());
+	return crypto.randomBytes(16);
 }
 
 function ackMessage(userHash, packageHash, payload) {
 	console.log("acknowledging message for " + userHash.toString());
 }
 
-server.listen(port, '::1', function() {
+server.listen(protocol.port, 'localhost', function() {
 	console.log("Garlic listening on: http://localhost:%s", port);
 });
