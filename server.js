@@ -78,53 +78,53 @@ function handleMessage(reqIn, resIn) {
 			userHash = commandBlock.slice(protocol.cbUserHashStart, protocol.cbUserHashEnd);
 			payload = data.slice(protocol.headerLength);
 
-			//RELAY
-			if(command != protocol.commandAck) {
-				var nextTargetLength = commandBlock[protocol.cbTailStart];
-				if(nextTargetLength > protocol.maxUrlLength) {
-					console.log("url too long, dropping");
-					return;
+			chunks = [];
+			var aesStream = crypto.createDecipheriv(protocol.aesMethod, aesKey, aesIV);
+			aesStream.on('data', function(chunk) { chunks.push(chunk); });
+			aesStream.on('end', function() {
+				payload = Buffer.concat(chunks);
+
+				//PUT
+				if(command == protocol.commandPut) {
+					payload = putMessage(userHash, protocol.hash(payload), payload);
 				}
 
-				nextTarget = commandBlock.slice(protocol.cbTailStart + 1, protocol.cbTailStart + nextTargetLength + 1).toString('utf-8');
-				nextTarget = url.parse(nextTarget);
+				if(command == protocol.commandAck) {
+					ackMessage(userHash, payload);
+				} else {
+					//RELAY
+					var nextTargetLength = commandBlock[protocol.cbTailStart];
+					if(nextTargetLength > protocol.maxUrlLength) {
+						console.log("url too long, dropping");
+						return;
+					}
 
-				var reqOut = http.request({
-					host: nextTarget.host,
-					port: nextTarget.port,
-					method: 'PUT'
-				});
+					nextTarget = commandBlock.slice(protocol.cbTailStart + 1, protocol.cbTailStart + nextTargetLength + 1).toString('utf-8');
+					nextTarget = url.parse(nextTarget);
+					var reqOut = http.request({ host: nextTarget.host, port: nextTarget.port, method: 'PUT' });
 
-				var streams = [];
-				for(i = 1; i < protocol.cbCount; i++) {
+					var streams = [];
+					for(i = 1; i < protocol.cbCount; i++) {
+						streams.push(function() {
+							var aesStream = crypto.createDecipheriv(protocol.aesMethod, aesKey, aesIV);
+							aesStream.end(data.slice(i*protocol.cbLength, (i+1)*protocol.cbLength));
+							return aesStream;
+						});
+					}
 					streams.push(function() {
-						var aesStream = crypto.createDecipheriv(protocol.aesMethod, aesKey, aesIV);
-						aesStream.end(data.slice(i*protocol.cbLength, (i+1)*protocol.cbLength));
-						return aesStream;
+						var s = new stream.PassThrough();
+						s.end(crypto.randomBytes(protocol.cbLength));
+						return s;
 					});
+					streams.push(function() {
+						var s = new stream.PassThrough();
+						s.end(payload);
+						return s;
+					});
+
+					MultiStream(streams).pipe(reqOut, { end: false });
 				}
-				streams.push(function() {
-					var s = new stream.PassThrough();
-					s.end(crypto.randomBytes(protocol.cbLength));
-					return s;
-				});
-
-				streams.push(function() {
-					var aesStream = crypto.createDecipheriv(protocol.aesMethod, aesKey, aesIV);
-					aesStream.end(payload);
-					return aesStream;
-				});
-
-				MultiStream(streams).pipe(reqOut);
-			}
-
-			if (command == protocol.commandPut) {
-				packageHash = protocol.hash(payload);
-				payload = putMessage(userHash, packageHash, payload);
-			} else if (command == protocol.commandAck) {
-				packageHash = commandBlock.slice(protocol.cbTailStart, protocol.cbTailStart + protocol.userHashLength);
-				ackMessage(userHash, packageHash, payload);
-			}
+			});
 		} else {
 			console.log("unsupported protocol version");
 		}
@@ -133,12 +133,16 @@ function handleMessage(reqIn, resIn) {
 }
 
 function putMessage(userHash, packageHash, payload) {
+	var ackPayload = payload.slice(0, protocol.plAckLength);
+	var putPayload = payload.slice(protocol.plAckLength);
+
 	console.log("putting message for " + userHash.toString());
-	console.log("message: " + payload.toString());
-	return crypto.randomBytes(16);
+	console.log("message: " + putPayload.toString());
+
+	return ackPayload;
 }
 
-function ackMessage(userHash, packageHash, payload) {
+function ackMessage(userHash, payload) {
 	console.log("acknowledging message for " + userHash.toString());
 }
 

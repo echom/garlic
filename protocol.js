@@ -34,10 +34,14 @@ protocol.cbUserHashStart = protocol.cbAesIvEnd;
 protocol.cbUserHashEnd = protocol.cbAesIvEnd + protocol.userHashLength;
 protocol.cbTailStart = protocol.cbUserHashEnd;
 
+protocol.plAckLength = 256;
+protocol.plMinExponent = 10;
 
-protocol.getMessageSize = function(byteLength) {
-	var l = Math.log(byteLength) / Math.log(2);
-	return Math.pow(2, Math.ceil((l - 4) / 2) * 2 + 4);
+
+protocol.getMessageSize = function(contentLength) {
+	var byteLength = contentLength + protocol.plAckLength;
+	var l = Math.max(protocol.plMinExponent, Math.log(byteLength) / Math.log(2));
+	return Math.pow(2, Math.ceil(l/2)*2);
 };
 
 protocol.hash = function(data) {
@@ -57,9 +61,8 @@ module.exports = protocol;
 //        4 byte symmetric iv for transport container
 //       32 byte user hash (empty in case of relay)
 //        case put/relay:  1 byte URL-length, 172 byte URL (utf-8 encoded)
-//        case ack:       32 byte package hash
 //    - end header
-//    - payload (size: 2^(2n+4) bytes with 0 >= n <= 10)
+//    - payload
 //
 // Node receives message
 // - decrypt first command block (node's private RSA key)
