@@ -61,8 +61,9 @@ function handleMessage(reqIn, resIn) {
 	});
 	reqIn.on('end', function() {
 		data = Buffer.concat(chunks);
+		console.log(data.length);
 		commandBlock = data.slice(0, protocol.cbLength);
-		console.log(commandBlock.length);
+
 		try {
 			commandBlock = key.decrypt(commandBlock);
 		} catch(e) {
@@ -80,10 +81,12 @@ function handleMessage(reqIn, resIn) {
 
 			chunks = [];
 			var aesStream = crypto.createDecipheriv(protocol.aesMethod, aesKey, aesIV);
+			aesStream.setAutoPadding(false);
 			aesStream.on('data', function(chunk) { chunks.push(chunk); });
 			aesStream.on('end', function() {
 				payload = Buffer.concat(chunks);
 
+				console.log("hello", command);
 				//PUT
 				if(command == protocol.commandPut) {
 					payload = putMessage(userHash, protocol.hash(payload), payload);
@@ -92,6 +95,7 @@ function handleMessage(reqIn, resIn) {
 				if(command == protocol.commandAck) {
 					ackMessage(userHash, payload);
 				} else {
+					console.log("RELAY");
 					//RELAY
 					var nextTargetLength = commandBlock[protocol.cbTailStart];
 					if(nextTargetLength > protocol.maxUrlLength) {
@@ -101,15 +105,22 @@ function handleMessage(reqIn, resIn) {
 
 					nextTarget = commandBlock.slice(protocol.cbTailStart + 1, protocol.cbTailStart + nextTargetLength + 1).toString('utf-8');
 					nextTarget = url.parse(nextTarget);
-					var reqOut = http.request({ host: nextTarget.host, port: nextTarget.port, method: 'PUT' });
+console.log(nextTargetLength, nextTarget);
+
+					var reqOut = http.request({ host: nextTarget.hostname, port: nextTarget.port, method: 'PUT' });
 
 					var streams = [];
 					for(i = 1; i < protocol.cbCount; i++) {
-						streams.push(function() {
-							var aesStream = crypto.createDecipheriv(protocol.aesMethod, aesKey, aesIV);
-							aesStream.end(data.slice(i*protocol.cbLength, (i+1)*protocol.cbLength));
-							return aesStream;
-						});
+						streams.push((function(ii) {
+							return function() {
+								var aesStream = crypto.createDecipheriv(protocol.aesMethod, aesKey, aesIV),
+									slice = data.slice(ii * protocol.cbLength, (ii + 1) * protocol.cbLength);
+								aesStream.setAutoPadding(false);
+								aesStream.end(slice);
+								//console.log(slice.length, ii, ii * protocol.cbLength, (ii + 1) * protocol.cbLength);
+								return aesStream;
+							};
+						})(i));
 					}
 					streams.push(function() {
 						var s = new stream.PassThrough();
@@ -119,12 +130,14 @@ function handleMessage(reqIn, resIn) {
 					streams.push(function() {
 						var s = new stream.PassThrough();
 						s.end(payload);
+						console.log("writing payload", payload.length);
 						return s;
 					});
 
-					MultiStream(streams).pipe(reqOut, { end: false });
+					MultiStream(streams).pipe(reqOut);
 				}
 			});
+			aesStream.end(payload);
 		} else {
 			console.log("unsupported protocol version");
 		}
@@ -136,14 +149,14 @@ function putMessage(userHash, packageHash, payload) {
 	var ackPayload = payload.slice(0, protocol.plAckLength);
 	var putPayload = payload.slice(protocol.plAckLength);
 
-	console.log("putting message for " + userHash.toString());
-	console.log("message: " + putPayload.toString());
+	console.log("putting message for " + userHash.toString('hex'));
+	console.log("message: " + putPayload.toString('utf-8'));
 
 	return ackPayload;
 }
 
 function ackMessage(userHash, payload) {
-	console.log("acknowledging message for " + userHash.toString());
+	console.log("acknowledging message for " + userHash.toString('hex'));
 }
 
 server.listen(protocol.port, 'localhost', function() {

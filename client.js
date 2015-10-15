@@ -9,7 +9,7 @@ pubKeyCache['http://localhost:' + protocol.port] = new NodeRSA(fs.readFileSync('
 
 function _makeCommand(command, aesKey, aesIV, rsaKey, userHash, nextTarget) {
 	var buffers = [];
-	buffers.push(new Buffer([protocol.version, protocol.commandPut]));
+	buffers.push(new Buffer([protocol.version, command]));
 	buffers.push(aesKey);
 	buffers.push(aesIV);
 	buffers.push(userHash || new Buffer(32));
@@ -22,26 +22,35 @@ function _makeCommand(command, aesKey, aesIV, rsaKey, userHash, nextTarget) {
 	return rsaKey.encrypt(Buffer.concat(buffers));
 }
 
-function makePut(aesKey, aesIV, userHash, rsaKey, nextTarget) {
-	return _makeCommand(protocol.commandPut, aesKey, aesIV, rsaKey, userHash, nextTarget);
-}
-function makeRelay(aesKey, aesIV, rsaKey, nextTarget) {
-	return _makeCommand(protocol.commandRelay, aesKey, aesIV, rsaKey, null, nextTarget);
-}
-function makeAck(aesKey, aesIV, userHash, rsaKey) {
-	return _makeCommand(protocol.commandAck, aesKey, aesIV, rsaKey, userHash);
-}
-
 function getTargetRSA(target) { return pubKeyCache[target]; }
 
+function zeroes(size) {
+	var buf = new Buffer(size);
+	buf.fill(0);
+	return buf;
+}
+
+
+function createPayload(buffer, sender, recipient) {
+	
+}
+
 function createMessage(payload, sender, recipient) {
+	var payloadBuffer = createPayload(payload, sender, recipient);
+
 	var ack = Buffer.concat([
 		protocol.hash(payload),
-		new Buffer(256 - 32) //pure padding while we don't encrypt the ack;
+		zeroes(256 - 32) //pure padding while we don't encrypt the ack;
 	]);
+	console.log("ack length", ack.length);
 
 	var messageSize = protocol.getMessageSize(payload.length);
-	payload = Buffer.concat([payload, crypto.randomBytes(messageSize - payload.length)]);
+	payload = Buffer.concat([
+		payload,
+		zeroes(messageSize - protocol.plAckLength - payload.length)
+	]);
+
+	console.log("payload length (w/o ack)", payload.length);
 
 	return {
 		payload: payload,
@@ -60,38 +69,46 @@ function onionize(message, command, target, cb) {
 	var aesIV = crypto.randomBytes(protocol.aesIVLength)
 	var targetRSA = getTargetRSA(target);
 
-	message.commands.unshift(_makeCommand(
-		command, aesKey, aesIV, targetRSA,
-		command == protocol.commandAck ? message.sender : message.recipient,
-		message.target
-	));
+
 	var ncommands = message.commands.length,
 		processing = ncommands,
-		aes;
+		aes,
+		finalizeMessage = function() {
+			message.commands.unshift(_makeCommand(
+				command, aesKey, aesIV, targetRSA,
+				command == protocol.commandAck ? message.sender : message.recipient,
+				message.target
+			));
+
+			var chunks = [];
+			var aesStream = crypto.createCipheriv(protocol.aesMethod, aesKey, aesIV);
+			aesStream.setAutoPadding(false);
+			aesStream.on('data', function(chunk) { chunks.push(chunk) });
+			aesStream.on('end', function() {
+				message.data = Buffer.concat(chunks);
+				console.log("data size", message.data.length);
+				cb();
+			});
+			message.target = target;
+
+			if(command == protocol.commandPut) {
+				message.data = Buffer.concat([message.data, message.payload]);
+			}
+			aesStream.end(message.data);
+		};
+	if(ncommands == 0) finalizeMessage();
 	for(var i = 0; i < ncommands; i++) {
 		(function(ii) {
 			var chunks = [],
 				aesStream = crypto.createCipheriv(protocol.aesMethod, aesKey, aesIV);
-
+			aesStream.setAutoPadding(false);
 			aesStream.on('data', function(chunk) { chunks.push(chunk); });
 			aesStream.on('end', function() {
 				console.log('aesstream end');
 				message.commands[ii] = Buffer.concat(chunks);
 				processing--;
 				if(processing == 0) {
-					chunks = [];
-					aesStream = crypto.createCipheriv(protocol.aesMethod, aesKey, aesIV);
-					aesStream.on('data', function(chunk) {chunks.push(chunk) });
-					aesStream.on('end', function() {
-						message.data = Buffer.concat(chunks);
-						cb();
-					});
-					message.target = target;
-
-					if(command == protocol.commandPut) {
-						message.data = Buffer.concat([message.data, message.payload]);
-					}
-					aesStream.end(message.data);
+					finalizeMessage();
 				}
 			});
 			aesStream.end(message.commands[ii]);
@@ -107,9 +124,7 @@ function test() {
 		'http://localhost:' + protocol.port
 	);
 	onionize(message, protocol.commandAck, 'http://localhost:' + protocol.port, function() {
-		console.log("onionize ack");
 		onionize(message, protocol.commandPut, 'http://localhost:' + protocol.port, function() {
-			console.log("onionize put");
 			var reqOut = http.request({
 				host: 'localhost',
 				port: protocol.port,
