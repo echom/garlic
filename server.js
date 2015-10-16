@@ -1,5 +1,5 @@
 var http = require('http');
-var fs = require('fs')
+var fs = require('fs');
 var NodeRSA = require('node-rsa');
 var crypto = require('crypto');
 var protocol = require('./protocol');

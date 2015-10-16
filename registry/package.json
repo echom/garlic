@@ -1,0 +1,16 @@
+{
+  "name": "garlic-registry",
+  "version": "0.0.1",
+  "description": "Registry service for garlic user information",
+  "keywords": [
+    "messaging",
+    "registry"
+  ],
+  "repository": "https://github.com/echom/garlic.git",
+  "author": "Jörg Hösel <echom@gmx.net>",
+  "main": "index.js",
+  "dependencies": {
+    "mysql": "^2.9.0",
+    "node-rsa": "^0.2.26"
+  }
+}

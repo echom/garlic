@@ -7,6 +7,8 @@ var protocol = require('./protocol');
 var pubKeyCache = {};
 pubKeyCache['http://localhost:' + protocol.port] = new NodeRSA(fs.readFileSync('pub.pem'));
 
+
+
 function _makeCommand(command, aesKey, aesIV, rsaKey, userHash, nextTarget) {
 	var buffers = [];
 	buffers.push(new Buffer([protocol.version, command]));
@@ -31,8 +33,10 @@ function zeroes(size) {
 }
 
 
-function createPayload(buffer, sender, recipient) {
-	
+function createMessageBody(buffer, sender, recipient) {
+	var header = Buffer.concat([
+
+	]);
 }
 
 function createMessage(payload, sender, recipient) {

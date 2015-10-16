@@ -1,0 +1,15 @@
+{
+	"keys": {
+		"private": "key.pem",
+		"public": "pub.pem"
+	},
+	"db": {
+		"provider": "mysql",
+		"host": "localhost",
+		"user": "garlic",
+		"password": "<secret>",
+		"database": "garlic",
+		"connectionLimit": 10
+	},
+	"hosts": [{ "host": "localhost", "port": 80 }]
+}
