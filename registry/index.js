@@ -10,6 +10,13 @@
 
 	var db = mysql.createPool(config.db),
 		key = new NodeRSA(fs.readFileSync(config.keys.private)),
+		hashKey = function(key) {
+			var salt = crypto.randomBytes(4).toString('hex'),
+			return salt + '$' + hashKeyWithSalt(salt);
+		},
+		hashKeyWithSalt = function(key, salt) {
+			return hash = crypto.createHmac('sha-1', salt).update(key).digest(hex);
+		},
 		makeUserResponse = function(pubkey, server) {
 			return Buffer.concat(
 				rows[0].pubkey,
@@ -17,37 +24,105 @@
 				new Buffer(rows[0].server, 'utf-8')
 			)
 		},
+		fail: function(res, code) {
+			console.log('garlic-registry: FAIL', code);
+
+			res.status(code);
+			switch(code) {
+				case 400: res.end('Bad Request'); break;
+				case 403: res.end('Forbidden'); break;
+				case 404: res.end('Not Found'); break;
+				case 405: res.end('Method Not Allowed'); break;
+				case 500: res.end('Internal Server Error'); break;
+				default: res.end('Unknown Error'); break;
+			}
+		},
+		respond: function(res, resKey, resIV, data) {
+			var aes = crypto.createCipheriv('aes-256-cbc', resKey, resIV);
+			aes.pipe(res);
+			aes.end(data);
+		},
 		getUser = function(user, res, resKey, resIV) {
 			console.log('garlic-registry: request info', user);
-			db.query('SELECT * FROM user WHERE key = ?', [user], function(err, rows) {
+			db.query('SELECT * FROM users WHERE id = ?', [user], function(err, rows) {
 				console.log('garlic-registry: query complete', err);
 
 				var aes;
-
-				if(err) { res.status(500).end('Internal Server Error'); }
-				else if(rows.length == 0) { res.status(404).end('Not Found'); }
+				if(err) { fail(res, 500); }
+				else if(rows.length == 0) { fail(res, 404); }
 				else {
-					aes = crypto.createCipheriv('aes-256-cbc', resKey, resIV);
-					aes.pipe(res);
-					aes.end(makeUserResponse(rows[0].pubkey, rows[0].server));
+					respond(res, resKey, resIV, makeUserResponse(rows[0].pubkey, rows[0].server));
 				}
 			});
 		},
-		registerUser = (user, server, pubkey, callback) {},
-		updateUser(user, server, pubkey, updatekey, callback) {},
-		deleteUser(user, updatekey, callback) {},
+		registerUser = function(data, res, callback) {
+			console.log('garlic-registry: registering user', user);
+			var updateKey = crypto.randomBytes(32),
+				user = data.slice(0, 32),
+				pubkey = data.slice(32, 288),
+				serverLength = data.slice(288, 289),
+				server = data.slice(289, 289 + serverLength),
+				updateKeyHash = hashKey(updateKey);
+
+			db.query('SELECT id FROM users WHERE id = ?', [user], function(err, rows) {
+				if(err) { fail(res, 500); }
+				else if(rows.length > 0) { fail(res, 403); }
+				else {
+					db.query(
+						'INSERT INTO users (id, pubkey, server, updatekey) VALUES (?, ?, ?, ?)',
+						[id, pubkey, server, updateKeyHash],
+						function(err, result) {
+							if(result.affectedRows == 1) { callback(updateKey); }
+							else if(result.affectedRows == 0) { fail(res, 403); }
+							else if(err) { fail(res, 500); }
+						}
+					);
+				}
+			});
+		},
+		updateUser = function(data, res, callback) {
+			var updateKey = data.slice(32),
+				user = data.slice(32, 64),
+				pubkey = data.slice(64, 320),
+				serverLength = data.slice[320],
+				server = data.slice(321, 321 + serverLength),
+				updateKeyHash;
+
+			db.query('SELECT updatekey FROM users WHERE id = ?', [user], function(err, rows) {
+				if(err) { fail(res, 500); }
+				else if(rows.length = 0) { fail(res, 403); }
+				else {
+					var updateKeyHash = rows[0].updatekey.split('$'),
+						salt = updateKeyHash[0],
+						hash = updateKeyHash[1];
+					if(hashKeyWithSalt(updateKey, salt) == hash) {
+
+					} else {
+						fail(res, 403);
+					}
+				}
+			});
+		},
+		deleteUser = function(data, res, callback) {},
 		modifyUser = function(user, req, reqKey, reqIV, res, resKey, resIV) {
 			console.log('garlic-registry: request modification');
 
 			var aes = crypto.createDecipheriv('aes-256-cbc', reqKey, reqIV),
 				data = [],
 				modification,
-				data;
+				onUserModified = function(data) { respond(res, resKey, resIV, data); };
+
 			aes.on('data', function(chunk) { data.push(chunk); }):
 			aes.on('end', function() {
 				data = Buffer.concat(data);
 				modification = data[0];
-
+				data = data.slice(1);
+				switch(modification) {
+					case MOD_REGISTER: registerUser(data, res, onUserModified); break;
+					case MOD_UPDATE: updateUser(data, res, onUserModified); break;
+					case MOD_DELETE: deleteUser(data, res, onUserModified); break;
+					default: res.status(400).end('Bad Request'); break;
+				}
 			});
 			req.pipe(aes);
 		},
